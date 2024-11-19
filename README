@@ -1,0 +1,16 @@
+Dataset has the format
+Number of tasks of product one
+.
+.
+.
+Precedence relations
+.
+.
+.
+-1,-1 -> marks the end of precedence relations
+Incompatible tasks
+.
+.
+.
+-2,-2 -> marks the end of incompatible tasks
+Number of tasks for product 2

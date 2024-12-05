@@ -8,9 +8,9 @@ def read_input_from_excel(file_path):
         file_path (str): Path to the Excel file containing the input data.
     """
     
-    solver, cycle_time, num_products, num_tasks = _read_hyperparameters(file_path)
-
+    solver, num_products, num_tasks = _read_hyperparameters(file_path)
     tasks, product_names, task_time_dict = _read_task_times(file_path)
+    cycle_time_dict = _read_cycle_time(file_path, product_names)
     stationtype_compatibility, station_types = _read_station_types(file_path)
     station_costs = _read_station_costs(file_path)
     precedence_relations = _read_task_pairs(file_path, 'precedence_relations')
@@ -19,7 +19,7 @@ def read_input_from_excel(file_path):
 
     data_input = {
         "solver": solver,
-        "cycle_time": cycle_time,
+        "cycle_time_dict": cycle_time_dict,
         "num_tasks": num_tasks,
         "tasks": tasks,
         "product_names": product_names,
@@ -40,11 +40,19 @@ def _read_hyperparameters(file_path):
     df_overview = pd.read_excel(file_path, sheet_name='overview', header=None)
 
     solver = df_overview.iloc[0, 1]
-    cycle_time = int(df_overview.iloc[1, 1])
-    num_products = int(df_overview.iloc[2, 1])
-    num_tasks = int(df_overview.iloc[3, 1])
+    num_products = int(df_overview.iloc[1, 1])
+    num_tasks = int(df_overview.iloc[2, 1])
 
-    return (solver, cycle_time, num_products, num_tasks)
+    return (solver, num_products, num_tasks)
+
+def _read_cycle_time(file_path, product_names):
+    df_cycle_time = pd.read_excel(file_path, sheet_name='cycle_time')
+    cycle_time_dict = {}
+
+    for _, row in df_cycle_time.iterrows():
+        cycle_time_dict[row["Product"]] = int(row["Cycle_time"])
+
+    return cycle_time_dict
 
 def _read_task_times(file_path):
     df_tasks = pd.read_excel(file_path, sheet_name='task_times')

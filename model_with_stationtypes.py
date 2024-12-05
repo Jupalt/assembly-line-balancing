@@ -7,13 +7,15 @@ class OptimizationModel:
         logging.getLogger('pyomo').setLevel(logging.WARNING)
         self.model = None
 
-    def build_model(self, cycle_time, tasks, station_types, products, task_time_dict, precedence_relations,
+    def build_model(self, cycle_time_dict, tasks, station_types, products, task_time_dict, precedence_relations,
                     incompatible_tasks, same_station_pairs, stationtype_compatibility, station_costs):
         """
         Parameters: 
         ----------
-        cycle_time : int
-            The cycle time of the assembly line.
+        cycle_time_dict : dict[str, int]
+            A dictionary where:
+            - The key is a String, representing one product of the assembly line
+            - The value is the required cycle time for this product
         tasks : list[int]
             A list of tasks with their IDs.
         station_types : list[str]
@@ -55,7 +57,7 @@ class OptimizationModel:
         model.SameStationPairs = Set(initialize=same_station_pairs, within=model.TASKS * model.TASKS)
 
         # Parameters
-        model.c = Param(initialize=cycle_time) # Cycle time
+        model.c = Param(model.PRODUCTS, initialize=cycle_time_dict) # Cycle time
         model.t = Param(model.TASKS, model.PRODUCTS, initialize=task_time_dict) # Processing time of a task 
         model.F = Param(model.TASKS, model.TYPES, initialize=stationtype_compatibility, within=Binary)
         model.C = Param(model.TYPES, initialize=station_costs) # Cost for opening a station
@@ -64,6 +66,8 @@ class OptimizationModel:
         model.x = Var(model.TASKS, model.STATIONS, within=Binary)  # Task assignment
         model.z = Var(model.STATIONS, within=Binary)  # Station open/close
         model.y = Var(model.STATIONS, model.TYPES, within=Binary)  # Station type assignment
+        model.task_order = Var(model.TASKS, model.STATIONS, within=NonNegativeIntegers)
+
 
         # Objective function
         def objective_rule(model):
@@ -84,7 +88,7 @@ class OptimizationModel:
 
         # Cycle Time Constraint
         def cycle_time_rule(model, j, p):
-            return sum(model.t[i, p] * model.x[i, j] for i in model.TASKS) <= model.c * model.z[j]
+            return sum(model.t[i, p] * model.x[i, j] for i in model.TASKS) <= model.c[p] * model.z[j]
         model.cycle_time = Constraint(model.STATIONS, model.PRODUCTS, rule=cycle_time_rule)
 
         # Precedence Relations
@@ -101,18 +105,6 @@ class OptimizationModel:
         def station_compatibility_rule(model, i, j):
             return model.x[i, j] <= sum(model.F[i, k] * model.y[j, k] for k in model.TYPES)
         model.station_compatibility = Constraint(model.TASKS, model.STATIONS, rule=station_compatibility_rule)
-
-        """
-        # First Station Opening: If any station is opened, station 1 must be opened
-        def first_station_rule(model):
-            return model.z[1] >= sum(model.z[j] for j in model.STATIONS if j > 1)
-        model.first_station = Constraint(rule=first_station_rule)
-
-        # Station Opening Priority
-        def station_priority_rule(model, b, w):
-            return Constraint.Skip if b >= w else model.z[w] <= model.z[b]
-        model.station_priority = Constraint(model.STATIONS, model.STATIONS, rule=station_priority_rule)
-        """
         
         # Incompatible Tasks
         def incompatible_tasks_rule(model, d, f, j):
@@ -123,6 +115,15 @@ class OptimizationModel:
         def same_station_tasks_rule(model, m, n, j):
             return model.x[m, j] == model.x[n, j]
         model.same_station_tasks = Constraint(model.SameStationPairs, model.STATIONS, rule=same_station_tasks_rule)
+
+        def precedence_within_station_rule(model, g, h):
+            return sum(model.x[g, j] * model.task_order[g, j] for j in model.STATIONS) \
+                <= sum(model.x[h, j] * model.task_order[h, j] for j in model.STATIONS) - 1
+        model.precedence_within_station = Constraint(model.PrecedencePairs, rule=precedence_within_station_rule)
+
+        def task_order_assignment_rule(model, i, j):
+            return model.task_order[i, j] <= max_stations * model.x[i, j]
+        model.task_order_assignment = Constraint(model.TASKS, model.STATIONS, rule=task_order_assignment_rule)
 
         self.model = model
 
@@ -140,11 +141,15 @@ class OptimizationModel:
         if not solver.available():
             print(f"{solver_name} solver is not available!")
         else:
-            print(f"{solver_name} solver is ready to use!")
-            results = solver.solve(self.model)
-            self._write_results(results)
+            print(f"Using {solver_name} to solve the model.")
+            solver.options['Heuristics'] = 1.0
+            solver.options['MIPFocus'] = 2
+            solver.options['TimeLimit'] = 120
+            solver.options['MIPGap'] = 0.05
+            results = solver.solve(self.model, tee=True)
+            self._write_results()
 
-    def _write_results(self, results):
+    def _write_results(self):
         station_results = {}
 
         # Iterate over all stations
@@ -157,10 +162,18 @@ class OptimizationModel:
                         station_type = k
                         break
 
-                # Find the tasks assigned to this station
-                assigned_tasks = [
-                    i for i in self.model.TASKS if self.model.x[i, j].value == 1
-                ]
+                # Find the tasks assigned to this station and sort by task_order
+                assigned_tasks = sorted(
+                    [
+                        (i, self.model.task_order[i, j].value)
+                        for i in self.model.TASKS
+                        if self.model.x[i, j].value == 1
+                    ],
+                    key=lambda x: x[1]  # Sort by task_order
+                )
+
+                # Extract just the task IDs for output
+                assigned_tasks = [task[0] for task in assigned_tasks]
 
                 # Store the results for this station
                 station_results[j] = {
@@ -174,4 +187,20 @@ class OptimizationModel:
             print(
                 f"Station {count} with type {info['station_type']}: {info['assigned_tasks']}"
             ) 
-            count += 1      
+            count += 1
+
+    def add_constraint(self):
+        # Überprüfen, ob ConstraintList existiert
+        if not hasattr(self.model, 'NoGoodCuts'):
+            self.model.NoGoodCuts = ConstraintList()
+
+        # Aktuelle Lösung auslesen
+        solution = {(t, s): self.model.x[t, s].value for t in self.model.TASKS for s in self.model.STATIONS}
+
+        # Neues "No-Good-Cut"-Constraint hinzufügen
+        self.model.NoGoodCuts.add(
+            sum(
+                (1 - solution[t, s]) * self.model.x[t, s] + solution[t, s] * (1 - self.model.x[t, s])
+                for t in self.model.TASKS for s in self.model.STATIONS
+            ) >= 1
+        )
